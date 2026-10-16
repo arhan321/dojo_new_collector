@@ -10,6 +10,7 @@ extras_every_s=5
 http_timeout_s=5
 spool_max=20000
 
+//sample kalo robot nya lebih dari 1
 robot=1,192.168.255.101,R1
 robot=2,192.168.255.102,R1
 robot=3,192.168.255.103,R1
