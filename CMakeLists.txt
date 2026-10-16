@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.16)
+project(RMS_Yaskawa_Collector LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+option(RMS_ENABLE_YMCONNECT "Enable YMConnect YRC1000/SP210 hardware reader" OFF)
+
+find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
+
+add_executable(rms_collector src/HelloYMConnect.cpp)
+target_link_libraries(rms_collector PRIVATE Threads::Threads PkgConfig::CURL)
+if(MSVC)
+    target_compile_options(rms_collector PRIVATE /W4)
+else()
+    target_compile_options(rms_collector PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(RMS_ENABLE_YMCONNECT)
+    set(YMCONNECT_INCLUDE "${PROJECT_SOURCE_DIR}/sdk/include" CACHE PATH "Folder containing YMConnect.h")
+    set(YMCONNECT_LIBRARY "${PROJECT_SOURCE_DIR}/sdk/lib/libYMConnect.so" CACHE FILEPATH "Matching Linux .so SDK")
+    if(NOT EXISTS "${YMCONNECT_INCLUDE}/YMConnect.h")
+        message(FATAL_ERROR "YMConnect.h not found: ${YMCONNECT_INCLUDE}/YMConnect.h")
+    endif()
+    if(NOT EXISTS "${YMCONNECT_LIBRARY}")
+        message(FATAL_ERROR "YMConnect Linux library not found: ${YMCONNECT_LIBRARY}")
+    endif()
+    target_include_directories(rms_collector PRIVATE "${YMCONNECT_INCLUDE}")
+    target_compile_definitions(rms_collector PRIVATE RMS_WITH_YMCONNECT=1)
+    target_link_libraries(rms_collector PRIVATE "${YMCONNECT_LIBRARY}")
+    get_filename_component(YMCONNECT_LIBDIR "${YMCONNECT_LIBRARY}" DIRECTORY)
+    set_target_properties(rms_collector PROPERTIES BUILD_RPATH "${YMCONNECT_LIBDIR}" INSTALL_RPATH "${YMCONNECT_LIBDIR}")
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME mock_json_dry_run COMMAND rms_collector
+        --config "${PROJECT_SOURCE_DIR}/config/collector.conf.example"
+        --mock --once --dry-run)
+endif()

@@ -1,0 +1,2 @@
+/api/v1/collector/operating-times
+{"robot_id":2,"time_type":"ServoPowerOnTimeRobot","sampled_at":"2026-10-14T04:11:59.183Z","read_ok":true,"status_code":0,"status_message":"","value_raw":"SIMULATED seconds","value_seconds":442800,"raw_payload":{"simulated":true,"note":"value_seconds null until TimeData units verified; no implicit conversion"}}

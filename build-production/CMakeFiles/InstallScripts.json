@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/root/ymconnect/dojo_new/build-production/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

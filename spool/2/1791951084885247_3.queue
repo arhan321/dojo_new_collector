@@ -1,0 +1,2 @@
+/api/v1/collector/alarms/snapshots
+{"robot_id":2,"sampled_at":"2026-10-14T04:11:24.861Z","read_ok":true,"status_code":0,"status_message":"","sdk_text":"mock: no alarms","active_alarm_count":0,"parsed_alarms":null}

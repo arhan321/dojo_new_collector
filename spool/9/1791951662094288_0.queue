@@ -1,0 +1,2 @@
+/api/v1/collector/connections
+{"robot_id":9,"state":"connected","occurred_at":"2026-10-14T04:21:02.054Z","ip_address":"192.0.2.102","message":"MOCK TEST — NOT ACTUAL ROBOT","raw_payload":{"simulated":true,"control_group":"R1"}}

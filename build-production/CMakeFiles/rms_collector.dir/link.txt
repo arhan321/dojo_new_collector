@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/rms_collector.dir/link.d CMakeFiles/rms_collector.dir/src/HelloYMConnect.cpp.o -o rms_collector  -Wl,-rpath,/root/ymconnect/dojo_new /root/ymconnect/dojo_new/libYMConnect.so /usr/lib/x86_64-linux-gnu/libcurl.so

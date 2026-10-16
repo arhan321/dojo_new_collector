@@ -1,0 +1,4 @@
+{"schema_version":1,"type":"connection","timestamp_utc":"2026-10-12T07:21:04.469Z","robot_id":"YASKAWA_SP210_DOJO","ip":"192.168.255.1","state":"offline","message":"Code (196614): No response from controller after 3 retries."}
+{"schema_version":1,"type":"connection","timestamp_utc":"2026-10-12T07:21:11.474Z","robot_id":"YASKAWA_SP210_DOJO","ip":"192.168.255.1","state":"offline","message":"Code (196614): No response from controller after 3 retries."}
+{"schema_version":1,"type":"connection","timestamp_utc":"2026-10-12T07:21:18.477Z","robot_id":"YASKAWA_SP210_DOJO","ip":"192.168.255.1","state":"offline","message":"Code (196614): No response from controller after 3 retries."}
+{"schema_version":1,"type":"connection","timestamp_utc":"2026-10-12T07:22:10.893Z","robot_id":"YASKAWA_SP210_DOJO","ip":"192.168.255.1","state":"offline","message":"Code (196614): No response from controller after 3 retries."}
