@@ -37,6 +37,6 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     add_test(NAME mock_json_dry_run COMMAND rms_collector
-        --config "${PROJECT_SOURCE_DIR}/config/collector.conf.example"
+        --config "${PROJECT_SOURCE_DIR}/config/collector.conf"
         --mock --once --dry-run)
 endif()

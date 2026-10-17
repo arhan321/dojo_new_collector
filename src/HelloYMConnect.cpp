@@ -100,7 +100,7 @@ static Config configFrom(const std::string&path){std::ifstream f(path);if(!f)thr
  return c;}
 static std::string readToken(const fs::path&path){std::ifstream f(path);std::string token;if(!f||!std::getline(f,token))throw std::runtime_error("Missing collector token file: "+path.string());token=trim(token);if(token.empty()||token.find_first_of(" \r\n\t")!=std::string::npos)throw std::runtime_error("Bad token file");return token;}
 static size_t sink(char*p,size_t n,size_t m,void*data){auto&s=*static_cast<std::string*>(data);size_t bytes=n*m;if(s.size()<4096)s.append(p,std::min(bytes,4096-s.size()));return bytes;}
-struct HttpResult{CURLcode error=CURLE_OK;long status=0;std::string body;bool ok()const{return error==CURLE_OK&&(status==200||status==201);}bool fatal()const{return error==CURLE_OK&&(status==400||status==401||status==403||status==404||status==405||status==422);}std::string summary()const{return error==CURLE_OK?std::to_string(status):curl_easy_strerror(error);}};
+struct HttpResult{CURLcode error=CURLE_OK;long status=0;std::string body;bool ok()const{return error==CURLE_OK&&status>=200&&status<300;}bool fatal()const{return error==CURLE_OK&&status>=400&&status<500&&status!=408&&status!=425&&status!=429;}std::string summary()const{return error==CURLE_OK?std::to_string(status):curl_easy_strerror(error);}};
 class Http{
  const Config& c;std::string bearer;
  public:Http(const Config& cfg,std::string token):c(cfg),bearer(std::move(token)){}
@@ -126,54 +126,12 @@ struct RobotSample{
  std::optional<int64_t> operatingSeconds;
  std::optional<int> activeAlarms;
  std::optional<std::string> jobName;
- std::string stateJson="null",jobJson="null",ioJson="null",alarmHistoryJson="null";
+ std::string stateJson="null",jobJson="null",ioJson="null",alarmHistoryJson="null",activeAlarmsJson="[]";
 };
 // Stream-based SDK diagnostics are not guaranteed to be machine-readable structured fields.
 template<typename T,typename=void>struct Streamable:std::false_type{};
 template<typename T>struct Streamable<T,std::void_t<decltype(std::declval<std::ostream&>()<<std::declval<const T&>())>>:std::true_type{};
 template<typename T>static std::string streamIfPossible(const T&x){if constexpr(Streamable<T>::value){std::ostringstream out;out<<x;return out.str();}else return "type not streamable in installed SDK";}
-// Optional SDK method detection: supports multiple installed header versions without
-// assuming nonexistent typedefs. Only unambiguous, single-output signatures are invoked.
-#if defined(RMS_WITH_YMCONNECT) && RMS_WITH_YMCONNECT
-template<typename T,typename=void>struct HasReadState:std::false_type{};
-template<typename T>struct HasReadState<T,std::void_t<decltype(&T::ReadState)>>:std::true_type{};
-template<typename T,typename=void>struct HasJobInfo:std::false_type{};
-template<typename T>struct HasJobInfo<T,std::void_t<decltype(&T::GetExecutingJobInformation)>>:std::true_type{};
-template<typename T,typename=void>struct HasAlarmHistory:std::false_type{};
-template<typename T>struct HasAlarmHistory<T,std::void_t<decltype(&T::GetAlarmHistory)>>:std::true_type{};
-template<typename T>struct MethodArgs;
-template<typename Ret,typename C,typename... Args>struct MethodArgs<Ret(C::*)(Args...)>{using ArgsTuple=std::tuple<Args...>;static constexpr size_t size=sizeof...(Args);};
-template<typename Ret,typename C,typename... Args>struct MethodArgs<Ret(C::*)(Args...) const>{using ArgsTuple=std::tuple<Args...>;static constexpr size_t size=sizeof...(Args);};
-// Supports methods of the form StatusInfo ReadX(OutputData &), not guesses.
-template<typename Interface,typename Fn>
-static std::pair<Reading,std::string> readSingleOutput(Interface*iface,Fn method){
- using Traits=MethodArgs<Fn>;
- if constexpr(Traits::size==1){
-  using Arg=std::tuple_element_t<0,typename Traits::ArgsTuple>;
-  if constexpr(std::is_lvalue_reference_v<Arg> && !std::is_const_v<std::remove_reference_t<Arg>>){
-   using Out=std::remove_reference_t<Arg>;
-   Out data{};auto status=(iface->*method)(data);
-   bool ok=status.StatusCode==0;
-   return {{ok,int(status.StatusCode),ok?"":"YMConnect read returned error",ok?streamIfPossible(data):""},ok?streamIfPossible(data):""};
-  }
- }
- return {{false,-1,"SDK method output signature not recognized", ""},""};
-}
-// ReadState / Job output fields vary by SDK version. Retain OEM text as evidence;
-// never pretend text alone is an approved structured status or job identifier.
-template<typename StatusInterface>static std::pair<Reading,std::string> tryControllerState(StatusInterface*iface){
- if constexpr(HasReadState<StatusInterface>::value)return readSingleOutput(iface,&StatusInterface::ReadState);
- else return {{false,-1,"ReadState unavailable in installed YMConnect SDK", ""},""};
-}
-template<typename JobInterfaceType>static std::pair<Reading,std::string> tryJob(JobInterfaceType*iface){
- if constexpr(HasJobInfo<JobInterfaceType>::value)return readSingleOutput(iface,&JobInterfaceType::GetExecutingJobInformation);
- else return {{false,-1,"GetExecutingJobInformation unavailable in installed YMConnect SDK", ""},""};
-}
-template<typename FaultInterfaceType>static std::pair<Reading,std::string> tryHistory(FaultInterfaceType*iface){
- if constexpr(HasAlarmHistory<FaultInterfaceType>::value)return readSingleOutput(iface,&FaultInterfaceType::GetAlarmHistory);
- else return {{false,-1,"GetAlarmHistory unavailable or overloaded in installed YMConnect SDK", ""},""};
-}
-#endif
 class Reader{public:virtual ~Reader()=default;virtual bool connect()=0;virtual void disconnect()=0;virtual bool connected()const=0;virtual RobotSample collect(long long sequence,bool extra,bool op,bool alarms)=0;};
 class MockReader:public Reader{
  bool up=false;Device d;
@@ -188,6 +146,86 @@ class MockReader:public Reader{
   return s;}
 };
 
+#if defined(RMS_WITH_YMCONNECT) && RMS_WITH_YMCONNECT
+static std::string controlModeName(ControllerStateData::ControlMode mode){
+ switch(mode){
+  case ControllerStateData::ControlMode::Teach:return "Teach";
+  case ControllerStateData::ControlMode::Play:return "Play";
+  case ControllerStateData::ControlMode::Remote:return "Remote";
+ }
+ return "Unknown";
+}
+static std::string cycleModeName(CycleMode mode){
+ switch(mode){
+  case CycleMode::Step:return "Step";
+  case CycleMode::Cycle:return "Cycle";
+  case CycleMode::Automatic:return "Automatic";
+ }
+ return "Unknown";
+}
+static std::string alarmObjectJson(const AlarmData& alarm){
+ Json j;j.str("alarm_code",std::to_string(alarm.code));j.str("subcode",std::to_string(alarm.subcode));
+ j.str("alarm_name",alarm.name);j.str("controller_time_raw",alarm.time);return j.dump();
+}
+template<typename AlarmContainer>
+static std::string alarmArrayJson(const AlarmContainer& alarms,size_t requested){
+ const size_t count=std::min(requested,alarms.size());std::ostringstream out;out<<'[';
+ for(size_t i=0;i<count;i++){if(i)out<<',';out<<alarmObjectJson(alarms[i]);}
+ out<<']';return out.str();
+}
+static std::string activeAlarmText(const ActiveAlarms& alarms){
+ const size_t count=alarms.numberOfActiveAlarms;if(count==0)return "No active alarms.";
+ std::ostringstream out;out<<count<<(count==1?" alarm active.":" alarms active.");
+ const size_t details=std::min(count,alarms.alarms.size());
+ for(size_t i=0;i<details;i++){const auto& a=alarms.alarms[i];
+  out<<"\nAlarm "<<(i+1)<<": Code: "<<a.code<<"\nSubcode: "<<a.subcode<<"\nName: "<<a.name<<"\nTime: "<<a.time;}
+ return out.str();
+}
+static std::string operatingTimeText(const TimeData& time){
+ std::ostringstream out;out<<"Elapsed Time: "<<time.elapsedTime.Hours<<" Hours : "
+  <<time.elapsedTime.Minutes<<" Minutes : "<<time.elapsedTime.Seconds<<" Seconds";return out.str();
+}
+static std::string controllerStateJson(const ControllerStateData& state){
+ Json j;j.flag("known",true);j.flag("running",state.isRunning);j.flag("servo_on",state.isServoOn);
+ j.flag("alarm",state.isAlarming);j.flag("hold",state.isInHold);j.flag("error",state.isErroring);
+ j.str("control_mode",controlModeName(state.controlMode));j.str("cycle_mode",cycleModeName(state.cycleMode));return j.dump();
+}
+static std::string jobDataJson(const JobData& job){
+ Json j;j.str("name",job.name);j.num("line",static_cast<long long>(job.line));
+ j.num("step",static_cast<long long>(job.stepNumber));j.num("speed_override_percent",static_cast<double>(job.speedOverride));
+ j.str("task","Master");return j.dump();
+}
+static std::string alarmCategoryName(AlarmCategory category){
+ switch(category){
+  case AlarmCategory::Major:return "Major";case AlarmCategory::Minor:return "Minor";
+  case AlarmCategory::UserSystem:return "UserSystem";case AlarmCategory::User:return "User";
+  case AlarmCategory::Offline:return "Offline";
+ }
+ return "Unknown";
+}
+static constexpr UINT32 ALARM_HISTORY_PER_CATEGORY=20;
+static std::string readAlarmHistory(FaultInterface* faults,Reading& result){
+ const std::array<AlarmCategory,5> categories{{AlarmCategory::Major,AlarmCategory::Minor,
+  AlarmCategory::UserSystem,AlarmCategory::User,AlarmCategory::Offline}};
+ std::ostringstream entries;entries<<'[';bool first=true,allOk=true,anyOk=false;
+ for(const auto category:categories){
+  AlarmHistory history{};const auto status=faults->GetAlarmHistory(category,ALARM_HISTORY_PER_CATEGORY,history);
+  const bool ok=status.StatusCode==0;allOk=allOk&&ok;anyOk=anyOk||ok;
+  if(!first)entries<<',';
+  first=false;
+  Json item;item.str("category",alarmCategoryName(category));item.flag("read_ok",ok);
+  item.num("status_code",static_cast<int>(status.StatusCode));item.num("requested_count",static_cast<int>(ALARM_HISTORY_PER_CATEGORY));
+  if(ok){const size_t count=std::min<size_t>(history.numberOfAlarmsFetched,history.alarm.size());
+   item.num("fetched_count",static_cast<int>(count));item.raw("alarms",alarmArrayJson(history.alarm,count));
+  }else{item.null("fetched_count");item.raw("alarms","[]");}
+  entries<<item.dump();
+ }
+ entries<<']';Json payload;payload.num("requested_per_category",static_cast<int>(ALARM_HISTORY_PER_CATEGORY));
+ payload.raw("categories",entries.str());
+ result={allOk,allOk?0:-1,allOk?"":(anyOk?"Some alarm history categories failed":"All alarm history category reads failed"),payload.dump()};
+ return payload.dump();
+}
+#endif
 #if defined(RMS_WITH_YMCONNECT) && RMS_WITH_YMCONNECT
 // Real SDK known-compatible core. Additional reads are kept isolated below.
 class YmReader:public Reader{
@@ -207,25 +245,36 @@ class YmReader:public Reader{
   if(out.torque.ok)for(int i=0;i<6;i++)out.torques[i]=static_cast<double>(t.axisData[i]);
   if(op){
    TimeData td{};auto res=controller->Status->ReadOperatingTimes(ControlGroupId::R1,TimeType::ServoPowerOnTimeRobot,td);
-   out.operating={res.StatusCode==0,int(res.StatusCode),res.StatusCode==0?"":"Operating time read failed",res.StatusCode==0?streamIfPossible(td):""};
-   // IMPORTANT: time units and TimeData fields require verification against OEM header/pendant.
-   // Until verified value_seconds remains null; no fake grease schedule.
+   const bool ok=res.StatusCode==0;
+   out.operating={ok,static_cast<int>(res.StatusCode),ok?"":"Operating time read failed",ok?operatingTimeText(td):""};
+   if(ok){
+    // YMConnect.h defines ElapsedTime as Hours, Minutes, Seconds.
+    // Validate minute/second components before using this as a duration.
+    if(td.elapsedTime.Minutes<60&&td.elapsedTime.Seconds<60){
+     const uint64_t total=uint64_t(td.elapsedTime.Hours)*3600ULL+
+       uint64_t(td.elapsedTime.Minutes)*60ULL+uint64_t(td.elapsedTime.Seconds);
+     out.operatingSeconds=static_cast<int64_t>(total);
+    }else out.operating.error="YMConnect elapsed time components are out of range";
+   }
   }
   if(alarms){
    ActiveAlarms a{};auto res=controller->Faults->GetActiveAlarms(a);
-   out.alarm={res.StatusCode==0,int(res.StatusCode),res.StatusCode==0?"":"Active alarm read failed",res.StatusCode==0?streamIfPossible(a):""};
-   // Do not infer number of alarms from a human-formatted string.
-   auto hist=tryHistory(controller->Faults);
-   out.alarmHistory=hist.first;
-   if(out.alarmHistory.ok){Json evidence;evidence.str("sdk_history_text",hist.second);out.alarmHistoryJson=evidence.dump();}
+   const bool ok=res.StatusCode==0;
+   out.alarm={ok,static_cast<int>(res.StatusCode),ok?"":"Active alarm read failed",ok?activeAlarmText(a):""};
+   if(ok){out.activeAlarms=static_cast<int>(a.numberOfActiveAlarms);
+    const size_t count=std::min<size_t>(a.numberOfActiveAlarms,a.alarms.size());
+    out.activeAlarmsJson=alarmArrayJson(a.alarms,count);}
+   out.alarmHistoryJson=readAlarmHistory(controller->Faults,out.alarmHistory);
   }
   if(extra){
-   auto state=tryControllerState(controller->Status);
-   out.state=state.first;
-   if(out.state.ok){Json obj;obj.str("sdk_state_text",state.second);obj.flag("structured_fields_verified",false);out.stateJson=obj.dump();}
-   auto job=tryJob(controller->Job);
-   out.job=job.first;
-   if(out.job.ok){Json obj;obj.str("sdk_job_text",job.second);obj.flag("job_name_verified",false);out.jobJson=obj.dump();}
+   ControllerStateData stateData{};auto stateStatus=controller->Status->ReadState(stateData);
+   const bool stateOk=stateStatus.StatusCode==0;
+   out.state={stateOk,static_cast<int>(stateStatus.StatusCode),stateOk?"":"YMConnect state read failed",stateOk?controllerStateJson(stateData):""};
+   if(stateOk)out.stateJson=controllerStateJson(stateData);
+   JobData jobData{};auto jobStatus=controller->Job->GetExecutingJobInformation(InformTaskNumber::Master,jobData);
+   const bool jobOk=jobStatus.StatusCode==0;
+   out.job={jobOk,static_cast<int>(jobStatus.StatusCode),jobOk?"":"YMConnect job read failed",jobOk?jobData.name:""};
+   if(jobOk){out.jobName=jobData.name;out.jobJson=jobDataJson(jobData);}
    Json ioValues;bool allIORead=true;
    if(d.io.empty()){out.io={false,-1,"No IO addresses configured", ""};}
    else {
@@ -248,8 +297,8 @@ class YmReader:public Reader{
 static std::string availability(const Reading&r){Json j;j.flag("read_ok",r.ok);j.num("status_code",r.code);j.str("message",r.error);if(r.ok)j.str("raw",r.raw);else j.null("raw");return j.dump();}
 static std::string metadata(const RobotSample&s,bool mock,const Device&d){Json j;j.flag("simulated",mock);j.str("torque_unit","sdk_raw");j.str("position_unit","pulses");j.str("group",d.group);j.raw("controller_state",s.stateJson);j.raw("job",s.jobJson);j.raw("io_values",s.ioJson);j.raw("alarm_history",s.alarmHistoryJson);j.raw("state_read",availability(s.state));j.raw("job_read",availability(s.job));j.raw("io_read",availability(s.io));j.raw("alarm_history_read",availability(s.alarmHistory));return j.dump();}
 static std::string telemetryJson(const Device&d,const std::string&session,long long seq,const std::string&at,const RobotSample&s,bool mock){Json j;j.num("robot_id",d.id);j.str("collector_session_id",session);j.num("sequence",seq);j.str("sampled_at",at);j.flag("position_ok",s.pos.ok);j.num("position_status_code",s.pos.code);j.str("position_status_message",s.pos.error);if(s.pos.ok){j.str("position_sampled_at",at);j.raw("position_pulses",axesJson(s.pulses));}else{j.null("position_sampled_at");j.null("position_pulses");}j.flag("torque_ok",s.torque.ok);j.num("torque_status_code",s.torque.code);j.str("torque_status_message",s.torque.error);if(s.torque.ok){j.str("torque_sampled_at",at);j.raw("torque_axes",axesJson(s.torques));}else{j.null("torque_sampled_at");j.null("torque_axes");}j.str("torque_unit","sdk_raw");j.raw("raw_payload",metadata(s,mock,d));return j.dump();}
-static std::string opJson(const Device&d,const std::string&at,const RobotSample&s,bool mock){Json j;j.num("robot_id",d.id);j.str("time_type","ServoPowerOnTimeRobot");j.str("sampled_at",at);j.flag("read_ok",s.operating.ok);j.num("status_code",s.operating.code);j.str("status_message",s.operating.error);if(s.operating.ok)j.str("value_raw",s.operating.raw);else j.null("value_raw");if(s.operating.ok&&s.operatingSeconds)j.num("value_seconds",static_cast<long long>(*s.operatingSeconds));else j.null("value_seconds");Json raw;raw.flag("simulated",mock);raw.str("note","value_seconds null until TimeData units verified; no implicit conversion");j.raw("raw_payload",raw.dump());return j.dump();}
-static std::string alarmJson(const Device&d,const std::string&at,const RobotSample&s,bool mock){Json j;j.num("robot_id",d.id);j.str("sampled_at",at);j.flag("read_ok",s.alarm.ok);j.num("status_code",s.alarm.code);j.str("status_message",s.alarm.error);if(s.alarm.ok)j.str("sdk_text",s.alarm.raw);else j.null("sdk_text");if(s.alarm.ok&&s.activeAlarms)j.num("active_alarm_count",*s.activeAlarms);else j.null("active_alarm_count");j.null("parsed_alarms");(void)mock;return j.dump();}
+static std::string opJson(const Device&d,const std::string&at,const RobotSample&s,bool mock){Json j;j.num("robot_id",d.id);j.str("time_type","ServoPowerOnTimeRobot");j.str("sampled_at",at);j.flag("read_ok",s.operating.ok);j.num("status_code",s.operating.code);j.str("status_message",s.operating.error);if(s.operating.ok)j.str("value_raw",s.operating.raw);else j.null("value_raw");if(s.operating.ok&&s.operatingSeconds)j.num("value_seconds",static_cast<long long>(*s.operatingSeconds));else j.null("value_seconds");Json raw;raw.flag("simulated",mock);raw.str("duration_unit","seconds");raw.str("duration_source","YMConnect TimeData.elapsedTime Hours/Minutes/Seconds");j.raw("raw_payload",raw.dump());return j.dump();}
+static std::string alarmJson(const Device&d,const std::string&at,const RobotSample&s,bool mock){Json j;j.num("robot_id",d.id);j.str("sampled_at",at);j.flag("read_ok",s.alarm.ok);j.num("status_code",s.alarm.code);j.str("status_message",s.alarm.error);if(s.alarm.ok)j.str("sdk_text",s.alarm.raw);else j.null("sdk_text");if(s.alarm.ok&&s.activeAlarms)j.num("active_alarm_count",*s.activeAlarms);else j.null("active_alarm_count");j.raw("parsed_alarms",s.alarm.ok?s.activeAlarmsJson:"null");Json raw;raw.flag("simulated",mock);raw.raw("active_alarms",s.alarm.ok?s.activeAlarmsJson:"null");raw.raw("alarm_history",s.alarmHistoryJson);raw.raw("alarm_history_read",availability(s.alarmHistory));j.raw("raw_payload",raw.dump());return j.dump();}
 static std::string connectionJson(const Device&d,const std::string&at,const std::string&state,bool mock){Json j;j.num("robot_id",d.id);j.str("state",state);j.str("occurred_at",at);j.str("ip_address",d.ip);j.str("message",mock?"MOCK TEST — NOT ACTUAL ROBOT":"YMConnect collector status");Json r;r.flag("simulated",mock);r.str("control_group",d.group);j.raw("raw_payload",r.dump());return j.dump();}
 static void waitUntil(Clock::time_point target){while(running&&Clock::now()<target)std::this_thread::sleep_for(std::min(std::chrono::milliseconds(150),std::chrono::duration_cast<std::chrono::milliseconds>(target-Clock::now())));}
 static void loopOne(Config cfg,Device dev,bool mock,bool dry,bool once,const std::string&token){
@@ -262,15 +311,31 @@ static void loopOne(Config cfg,Device dev,bool mock,bool dry,bool once,const std
  throw std::runtime_error("Real collector needs -DRMS_ENABLE_YMCONNECT=ON and matching SDK");
 #endif
  }
- std::string session=uuid();long long sequence=0;bool announced=false;auto nextOp=Clock::now(),nextAlarm=nextOp,nextExtra=nextOp;
+ constexpr int MAX_CONSECUTIVE_BAD_SAMPLES=3;
+ std::string session=uuid();long long sequence=0;bool announced=false;int badSamples=0;
+ auto nextOp=Clock::now(),nextAlarm=nextOp,nextExtra=nextOp;
  log("[RMS] robot_id="+std::to_string(dev.id)+" ip="+dev.ip+(mock?" MOCK":" REAL")+" started");
- while(running){auto start=Clock::now();if(!reader->connected()&&!reader->connect()){if(announced){tx.post("/api/v1/collector/connections",connectionJson(dev,timestamp(),"offline",mock));announced=false;}tx.flush();if(once)break;waitUntil(start+std::chrono::milliseconds(cfg.telemetryMs));continue;}
+ while(running){
+  auto start=Clock::now();
+  if(!reader->connected()&&!reader->connect()){
+   if(once)throw std::runtime_error("YMConnect could not connect to robot "+std::to_string(dev.id)+" at "+dev.ip);
+   if(announced){tx.post("/api/v1/collector/connections",connectionJson(dev,timestamp(),"offline",mock));announced=false;}
+   tx.flush();waitUntil(start+std::chrono::milliseconds(cfg.telemetryMs));continue;
+  }
   auto now=Clock::now();bool doOp=now>=nextOp,doAlarm=now>=nextAlarm,doExtras=now>=nextExtra;
   RobotSample r=reader->collect(sequence,doExtras,doOp,doAlarm);
-  bool good=r.pos.ok||r.torque.ok;std::string at=timestamp();
-  if(good&&!announced){tx.post("/api/v1/collector/connections",connectionJson(dev,at,"connected",mock));announced=true;}
-  if(!good&&announced){tx.post("/api/v1/collector/connections",connectionJson(dev,at,"offline",mock));announced=false;reader->disconnect();}
-  if(good){tx.post("/api/v1/collector/telemetry",telemetryJson(dev,session,sequence,at,r,mock));}
+  const bool good=r.pos.ok||r.torque.ok;const std::string at=timestamp();
+  if(good){badSamples=0;if(!announced){tx.post("/api/v1/collector/connections",connectionJson(dev,at,"connected",mock));announced=true;}}
+  else{
+   ++badSamples;
+   if(badSamples>=MAX_CONSECUTIVE_BAD_SAMPLES){
+    if(announced)tx.post("/api/v1/collector/connections",connectionJson(dev,at,"offline",mock));
+    announced=false;reader->disconnect();badSamples=0;
+    log("[YMConnect "+std::to_string(dev.id)+"] disconnected after "+std::to_string(MAX_CONSECUTIVE_BAD_SAMPLES)+" consecutive cycles with no position or torque data");
+   }
+  }
+  if(once&&!good)throw std::runtime_error("No position or torque read succeeded for robot "+std::to_string(dev.id));
+  if(good)tx.post("/api/v1/collector/telemetry",telemetryJson(dev,session,sequence,at,r,mock));
   if(doOp){tx.post("/api/v1/collector/operating-times",opJson(dev,timestamp(),r,mock));nextOp=now+std::chrono::seconds(cfg.operatingS);}
   if(doAlarm){tx.post("/api/v1/collector/alarms/snapshots",alarmJson(dev,timestamp(),r,mock));nextAlarm=now+std::chrono::seconds(cfg.alarmS);}
   if(doExtras){nextExtra=now+std::chrono::seconds(cfg.extrasS);if(!r.state.ok||!r.job.ok||!r.io.ok)log("[SDK "+std::to_string(dev.id)+"] extras: "+r.state.error+"; "+r.job.error+"; "+r.io.error);}
